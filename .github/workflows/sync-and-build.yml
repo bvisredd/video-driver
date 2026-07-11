@@ -1,0 +1,218 @@
+name: _build
+
+on:
+  workflow_call:
+    inputs:
+      docker_image:
+        description: Docker image
+        type: string
+        required: true
+      build_matrix:
+        description: Build matrix for multi target builds
+        type: string
+        required: true
+
+jobs:
+  build:
+    timeout-minutes: 720
+    runs-on:
+      group: GHA-video-Prd-SelfHosted-RG
+      labels: [self-hosted, video-prd-u2204-x64-large-od-ephem]
+    strategy:
+      fail-fast: false
+      matrix:
+        build_matrix: ${{ fromJson(inputs.build_matrix) }}
+
+    steps:
+      - name: Sync video-driver codebase
+        uses: qualcomm-linux/video-driver/.github/actions/sync@atest-meta-qcom-sync
+        with:
+          event_name: ${{ github.event_name }}
+          pr_ref: ${{ github.event.pull_request.head.ref || '' }}
+          pr_repo: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          base_ref: ${{ github.ref_name }}
+
+      - name: Clone meta-qcom as sibling repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          PARENT_DIR="$(dirname "${{ github.workspace }}")"
+          META_QCOM_DIR="${PARENT_DIR}/meta-qcom"
+
+          rm -rf "${META_QCOM_DIR}"
+          git clone --depth 1 https://github.com/qualcomm-linux/meta-qcom "${META_QCOM_DIR}"
+
+          echo "=== parent workspace ==="
+          ls -la "${PARENT_DIR}"
+          echo "=== meta-qcom/ci ==="
+          ls -la "${META_QCOM_DIR}/ci" || true
+
+      - name: Pull Docker image
+        uses: qualcomm-linux/kernel-config/.github/actions/pull_docker_image@main
+        with:
+          image: ${{ inputs.docker_image }}
+          registry: artifacts.codelinaro.org/clo-420-qli-registry
+
+      - name: Retag Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker tag \
+            "artifacts.codelinaro.org/clo-420-qli-registry/${{ inputs.docker_image }}" \
+            "${{ inputs.docker_image }}" || true
+          docker images | grep kmake-image || true
+
+      # - name: Patch meta-qcom recipe to current video-driver commit
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     bash ci/patch_srcrev.sh \
+      #       "${{ github.workspace }}" \
+      #       "$(dirname "${{ github.workspace }}")/meta-qcom" \
+      #       "${{ github.event.pull_request.head.repo.full_name || '' }}"
+
+      - name: Build ${{ matrix.build_matrix.machine }}
+        uses: qualcomm-linux/video-driver/.github/actions/build@atest-meta-qcom-sync
+        with:
+          docker_image: ${{ inputs.docker_image }}
+          kas_file: ${{ matrix.build_matrix.kas_file }}
+          build_command: "bitbake qcom-multimedia-proprietary-image"
+        env:
+          machine: ${{ matrix.build_matrix.machine }}
+
+      - name: Download iris_test_app from S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/v4l-video-test-app/build"
+          echo "Syncing files from s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/"
+          aws s3 sync \
+            "s3://qli-prd-video-gh-artifacts/qualcomm-linux/video-driver/iris_test_app/" \
+            "${{ github.workspace }}/v4l-video-test-app/build/"
+          echo "✅ Download complete"
+          ls -la "${{ github.workspace }}/v4l-video-test-app/build/"
+
+      - name: Download the video-contents for testing
+        shell: bash
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/downloads"
+          echo "Downloading the video-content files"
+          wget -q \
+            "https://github.com/qualcomm-linux/qcom-linux-testkit/releases/download/IRIS-Video-Files-v1.0/video_clips_iris.tar.gz" \
+            -O "${{ github.workspace }}/downloads/video_clips_iris.tar.gz"
+
+          [ -f "$WORKSPACE/downloads/video_clips_iris.tar.gz" ] || {
+            echo "❌ Failed to download video_clips_iris.tar.gz"
+            exit 1
+          }
+
+          ls -la "${{ github.workspace }}/downloads/"
+
+      - name: Inject Iris test app to rootfs
+        uses: qualcomm-linux/video-driver/.github/actions/inject@atest-meta-qcom-sync
+        with:
+          docker_image: ${{ inputs.docker_image }}
+          machine: ${{ matrix.build_matrix.machine }}
+
+      - name: Prepare .qcomflash files for S3 upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="${{ github.workspace }}"
+          machine="${{ matrix.build_matrix.machine }}"
+
+          symlink_path="$workspace/build/tmp/deploy/images/$machine/qcom-multimedia-proprietary-image-${machine}.rootfs.qcomflash"
+
+          if [ ! -L "$symlink_path" ]; then
+            echo "❌ Symlink not found: $symlink_path"
+            exit 1
+          fi
+
+          resolved_dir=$(readlink -f "$symlink_path")
+
+          if [ ! -d "$resolved_dir" ]; then
+            echo "❌ Resolved .qcomflash directory not found: $resolved_dir"
+            exit 1
+          fi
+
+          ROOTFS_IMG="$resolved_dir/rootfs.img"
+          if [ ! -f "$ROOTFS_IMG" ]; then
+            echo "❌ rootfs.img not found at: $ROOTFS_IMG"
+            exit 1
+          fi
+
+          echo "=== qcomflash contents ==="
+          ls -larth "$resolved_dir"
+
+          mkdir -p "$workspace/artifacts"
+          : > "$workspace/artifacts/file_list.txt"
+
+          # ---------------------------------------------------------------
+          # Split into TWO artifacts:
+          # 1. {machine}_flash_files.tar — everything EXCEPT rootfs.img
+          # 2. {machine}_rootfs.img      — injected rootfs
+          # LAVA downloads them sequentially then combines in Docker.
+          # ---------------------------------------------------------------
+
+          FLASH_TAR="$workspace/${machine}_flash_files.tar"
+          ROOTFS_DEST="$workspace/${machine}_rootfs.img"
+
+          echo "📦 Creating flash_files.tar (excluding rootfs.img)..."
+          tar -cf "$FLASH_TAR" \
+            -C "$resolved_dir" \
+            --exclude='./rootfs.img' \
+            .
+          echo "✅ flash_files.tar: $(ls -lh "$FLASH_TAR" | awk '{print $5}')"
+
+          echo "📦 Copying injected rootfs.img..."
+          cp "$ROOTFS_IMG" "$ROOTFS_DEST"
+          echo "✅ rootfs.img: $(ls -lh "$ROOTFS_DEST" | awk '{print $5}')"
+
+          echo "$FLASH_TAR"   >> "$workspace/artifacts/file_list.txt"
+          echo "$ROOTFS_DEST" >> "$workspace/artifacts/file_list.txt"
+
+          echo "=== Queued for upload ==="
+          cat "$workspace/artifacts/file_list.txt"
+
+      - name: Upload artifacts to S3
+        id: upload-artifacts
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@atest-meta-qcom-sync
+        with:
+          s3_bucket: qli-prd-video-gh-artifacts
+          local_file: ${{ github.workspace }}/artifacts/file_list.txt
+          mode: multi-upload
+          upload_location: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.build_matrix.machine }}
+        env:
+          machine: ${{ matrix.build_matrix.machine }}
+
+      - name: Upload machine-specific presigned URLs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: presigned-urls-${{ matrix.build_matrix.machine }}
+          path: ${{ github.workspace }}/presigned_urls.json
+          retention-days: 3
+
+      - name: Clean up
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "${{ github.workspace }}/artifacts"   || true
+          rm -rf "${{ github.workspace }}/build"       || true
+          rm -rf "${{ github.workspace }}/downloads"   || true
+          rm -f  "${{ github.workspace }}/"*_flash_files.tar || true
+          rm -f  "${{ github.workspace }}/"*_rootfs.img || true
+
+      - name: Update summary
+        if: success() || failure()
+        shell: bash
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            summary=":heavy_check_mark: Build Success for ${{ matrix.build_matrix.machine }}"
+          else
+            summary=":x: Build Failed for ${{ matrix.build_matrix.machine }}"
+          fi
+          echo -e "<details><summary><i>Build Summary</i></summary>\n${summary}\n</details>" \
+            >> "$GITHUB_STEP_SUMMARY"
