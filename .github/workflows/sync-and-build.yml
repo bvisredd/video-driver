@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Sync video-driver codebase
-        uses: qualcomm-linux/video-driver/.github/actions/sync@atest-meta-qcom-sync
+        uses: qualcomm-linux/video-driver/.github/actions/sync@latest-meta-qcom-sync
         with:
           event_name: ${{ github.event_name }}
           pr_ref: ${{ github.event.pull_request.head.ref || '' }}
@@ -72,7 +72,7 @@ jobs:
       #       "${{ github.event.pull_request.head.repo.full_name || '' }}"
 
       - name: Build ${{ matrix.build_matrix.machine }}
-        uses: qualcomm-linux/video-driver/.github/actions/build@atest-meta-qcom-sync
+        uses: qualcomm-linux/video-driver/.github/actions/build@latest-meta-qcom-sync
         with:
           docker_image: ${{ inputs.docker_image }}
           kas_file: ${{ matrix.build_matrix.kas_file }}
@@ -112,7 +112,7 @@ jobs:
           ls -la "${{ github.workspace }}/downloads/"
 
       - name: Inject Iris test app to rootfs
-        uses: qualcomm-linux/video-driver/.github/actions/inject@atest-meta-qcom-sync
+        uses: qualcomm-linux/video-driver/.github/actions/inject@latest-meta-qcom-sync
         with:
           docker_image: ${{ inputs.docker_image }}
           machine: ${{ matrix.build_matrix.machine }}
@@ -179,7 +179,7 @@ jobs:
 
       - name: Upload artifacts to S3
         id: upload-artifacts
-        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@atest-meta-qcom-sync
+        uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@latest-meta-qcom-sync
         with:
           s3_bucket: qli-prd-video-gh-artifacts
           local_file: ${{ github.workspace }}/artifacts/file_list.txt

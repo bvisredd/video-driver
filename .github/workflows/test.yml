@@ -95,7 +95,7 @@ jobs:
       - name: Render LAVA job definition
         if: ${{ matrix.build_matrix.lavaname }}
         id: render
-        uses: qualcomm-linux/video-driver/.github/actions/lava_job_render@atest-meta-qcom-sync
+        uses: qualcomm-linux/video-driver/.github/actions/lava_job_render@latest-meta-qcom-sync
         with:
           docker_image: ${{ inputs.docker_image }}
           machine: ${{ matrix.build_matrix.machine }}
