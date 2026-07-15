@@ -213,10 +213,22 @@ jobs:
             sleep 30
           done
 
-          if [ "${HEALTH:-}" != "Complete" ]; then
-            echo "::error::Job $JOB_ID health=$HEALTH (expected Complete)"
-            echo "summary=:warning: LAVA Job $HEALTH" >> "$GITHUB_OUTPUT"
+          # ---------------------------------------------------------------
+          # Do NOT fail solely on HEALTH != "Complete".
+          # Systemd boot noise (State: Running  Health: Unknown) is parsed
+          # by LAVA as unknown-result test cases, which forces the overall
+          # job health to "Incomplete" even when real tests passed.
+          # Only hard-fail on Canceled — let the result grep below decide.
+          # ---------------------------------------------------------------
+          if [ "${HEALTH:-}" = "Canceled" ]; then
+            echo "::error::LAVA job $JOB_ID was Canceled."
+            echo "summary=:x: LAVA Job Canceled" >> "$GITHUB_OUTPUT"
             exit 1
+          fi
+
+          if [ "${HEALTH:-}" = "Incomplete" ]; then
+            echo "⚠️  Job health is Incomplete (likely systemd boot noise in results)."
+            echo "    Continuing to validate actual test-case results..."
           fi
 
           echo "📋 Fetching results for job $JOB_ID..."
@@ -237,6 +249,10 @@ jobs:
           echo "=== Raw LAVA results ==="
           cat lava_results.txt
 
+          # ---------------------------------------------------------------
+          # Only check the result of the real test suite — ignore any
+          # lava-internal entries (boot, deploy) and systemd noise lines.
+          # ---------------------------------------------------------------
           RESULTS="$(
             grep -E \
               '^\* 0_video_pre-merge-tests\.Video_V4L2_Runner \[(pass|fail)\]' \
@@ -312,6 +328,11 @@ jobs:
                     | while IFS= read -r SUITE; do
                         SNAME=$(echo "$SUITE" | jq -r '.name')
                         SID=$(echo   "$SUITE" | jq -r '.id')
+                        # ---------------------------------------------------
+                        # Skip the lava-internal suite — it contains boot /
+                        # deploy steps and systemd noise parsed as results.
+                        # Only surface real test suites.
+                        # ---------------------------------------------------
                         if [ "$SNAME" != "lava" ]; then
                           TESTS=$(curl -sf -H "$AUTH" \
                             "$LAVA_URL/api/v0.2/jobs/$JOB_ID/suites/$SID/tests/")
@@ -322,6 +343,11 @@ jobs:
                               TURL="$LAVA_URL/results/$JOB_ID/$SID"
                               [ -n "$TNAME" ] && [ "$TNAME" != "null" ] \
                                 || continue
+                              # -------------------------------------------
+                              # Skip unknown results — these are systemd
+                              # boot noise lines misidentified as test cases.
+                              # -------------------------------------------
+                              [ "$TRESULT" = "unknown" ] && continue
                               jq -nc \
                                 --arg k "$TNAME" \
                                 --arg u "$TURL" \

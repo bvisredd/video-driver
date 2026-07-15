@@ -150,13 +150,6 @@ jobs:
           mkdir -p "$workspace/artifacts"
           : > "$workspace/artifacts/file_list.txt"
 
-          # ---------------------------------------------------------------
-          # Split into TWO artifacts:
-          # 1. {machine}_flash_files.tar — everything EXCEPT rootfs.img
-          # 2. {machine}_rootfs.img      — injected rootfs
-          # LAVA downloads them sequentially then combines in Docker.
-          # ---------------------------------------------------------------
-
           FLASH_TAR="$workspace/${machine}_flash_files.tar"
           ROOTFS_DEST="$workspace/${machine}_rootfs.img"
 
@@ -177,6 +170,9 @@ jobs:
           echo "=== Queued for upload ==="
           cat "$workspace/artifacts/file_list.txt"
 
+      # ------------------------------------------------------------------ #
+      #  S3 upload — generates presigned_urls.json (used by LAVA)          #
+      # ------------------------------------------------------------------ #
       - name: Upload artifacts to S3
         id: upload-artifacts
         uses: qualcomm-linux/video-driver/.github/actions/aws_s3_helper@latest-meta-qcom-sync
@@ -188,6 +184,34 @@ jobs:
         env:
           machine: ${{ matrix.build_matrix.machine }}
 
+      # ------------------------------------------------------------------ #
+      #  GitHub Artifacts — persistent backup when S3 URLs expire          #
+      # ------------------------------------------------------------------ #
+
+      # ⚠️  rootfs.img is ~7–8 GB — uses org artifact storage quota.
+      # Set compression-level to 0 (already a binary image; compression
+      # adds time with no size benefit). Retention kept at 7 days to
+      # balance quota vs. re-run window.
+
+      - name: Upload flash_files.tar to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-files-${{ matrix.build_matrix.machine }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/${{ matrix.build_matrix.machine }}_flash_files.tar
+          retention-days: 7
+          compression-level: 0   # tar is uncompressed binary; skip CPU cost
+
+      - name: Upload rootfs.img to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.build_matrix.machine }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/${{ matrix.build_matrix.machine }}_rootfs.img
+          retention-days: 7
+          compression-level: 0   # ext4 image; compression gives no benefit
+
+      # ------------------------------------------------------------------ #
+      #  Upload machine-scoped presigned URLs (consumed by _test job)      #
+      # ------------------------------------------------------------------ #
       - name: Upload machine-specific presigned URLs artifact
         uses: actions/upload-artifact@v4
         with:
@@ -199,20 +223,33 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -rf "${{ github.workspace }}/artifacts"   || true
-          rm -rf "${{ github.workspace }}/build"       || true
-          rm -rf "${{ github.workspace }}/downloads"   || true
-          rm -f  "${{ github.workspace }}/"*_flash_files.tar || true
-          rm -f  "${{ github.workspace }}/"*_rootfs.img || true
+          rm -rf "${{ github.workspace }}/artifacts"           || true
+          rm -rf "${{ github.workspace }}/build"               || true
+          rm -rf "${{ github.workspace }}/downloads"           || true
+          rm -f  "${{ github.workspace }}/"*_flash_files.tar   || true
+          rm -f  "${{ github.workspace }}/"*_rootfs.img        || true
 
       - name: Update summary
         if: success() || failure()
         shell: bash
         run: |
+          machine="${{ matrix.build_matrix.machine }}"
+          run_id="${{ github.run_id }}"
+          attempt="${{ github.run_attempt }}"
+
           if [ "${{ job.status }}" == "success" ]; then
-            summary=":heavy_check_mark: Build Success for ${{ matrix.build_matrix.machine }}"
+            summary=":heavy_check_mark: Build Success for ${machine}"
           else
-            summary=":x: Build Failed for ${{ matrix.build_matrix.machine }}"
+            summary=":x: Build Failed for ${machine}"
           fi
-          echo -e "<details><summary><i>Build Summary</i></summary>\n${summary}\n</details>" \
-            >> "$GITHUB_STEP_SUMMARY"
+
+          # Append GitHub artifact names to summary for easy reference
+          artifact_flash="flash-files-${machine}-${run_id}-${attempt}"
+          artifact_rootfs="rootfs-${machine}-${run_id}-${attempt}"
+
+          echo -e "<details><summary><i>Build Summary</i></summary>\n\
+          ${summary}\n\n\
+          **GitHub Artifacts (7-day retention):**\n\
+          - \`${artifact_flash}\`\n\
+          - \`${artifact_rootfs}\`\n\
+          </details>" >> "$GITHUB_STEP_SUMMARY"
