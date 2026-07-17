@@ -62,14 +62,14 @@ jobs:
             "${{ inputs.docker_image }}" || true
           docker images | grep kmake-image || true
 
-      - name: Patch meta-qcom recipe to current video-driver commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash ci/patch_srcrev.sh \
-            "${{ github.workspace }}" \
-            "$(dirname "${{ github.workspace }}")/meta-qcom" \
-            "${{ github.event.pull_request.head.repo.full_name || '' }}"
+      # - name: Patch meta-qcom recipe to current video-driver commit
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     bash ci/patch_srcrev.sh \
+      #       "${{ github.workspace }}" \
+      #       "$(dirname "${{ github.workspace }}")/meta-qcom" \
+      #       "${{ github.event.pull_request.head.repo.full_name || '' }}"
 
       - name: Build ${{ matrix.build_matrix.machine }}
         uses: qualcomm-linux/video-driver/.github/actions/build@latest-meta-qcom-sync
